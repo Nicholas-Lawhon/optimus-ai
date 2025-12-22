@@ -1,7 +1,7 @@
 [project]
-name = "bootdev-ai-bot"
+name = "optimus-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "A personal chatbot and ai agent, able to work autonomously on a machine."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

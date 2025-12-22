@@ -59,9 +59,12 @@ def generate_content(client, messages, verbose, user_prompt):
     config=types.GenerateContentConfig(tools=[available_functions], system_instruction=system_prompt),
     )
     
-    prompt_token_count = response.usage_metadata.prompt_token_count # type: ignore
-    response_token_count = response.usage_metadata.candidates_token_count # type: ignore
-    
+    if not response.usage_metadata:
+        raise RuntimeError("No usage metadata. This is likely due to a failed API call.")
+
+    prompt_token_count = response.usage_metadata.prompt_token_count
+    response_token_count = response.usage_metadata.candidates_token_count
+
     if not prompt_token_count or not response_token_count:
         raise RuntimeError("No prompt or response token count. This is likely due to a failed API call.")
     
@@ -75,9 +78,13 @@ def generate_content(client, messages, verbose, user_prompt):
     if response.function_calls:
         for function_call in response.function_calls:
             function_call_result = call_function(function_call, verbose=verbose)
+
+            if not function_call_result.parts:
+                raise Exception("Function call did not return any parts")
+
             part = function_call_result.parts[0]
-            
-            if not hasattr(part, "function_response") or not part.function_response.response:
+
+            if not hasattr(part, "function_response") or part.function_response is None or part.function_response.response is None:
                 raise Exception("Function call did not return a valid response")
             
             if verbose:
