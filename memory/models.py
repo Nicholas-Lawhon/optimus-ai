@@ -224,6 +224,7 @@ class Memory:
     content: str
     memory_type: MemoryType
     scope: MemoryScope
+    retention_policy: RetentionPolicy = RetentionPolicy.SHORT_TERM # Default value
     
     # Ownership (at least one should be set based on scope)
     user_id: Optional[str] = None
@@ -417,6 +418,7 @@ class MemoryQuery:
     # Filter by type/scope
     memory_types: Optional[list[MemoryType]] = None
     scopes: Optional[list[MemoryScope]] = None
+    retention_policies: Optional[list[RetentionPolicy]] = None
     
     # Filter by content
     tags: Optional[list[str]] = None  # Match ANY of these tags

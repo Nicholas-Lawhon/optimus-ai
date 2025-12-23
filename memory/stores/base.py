@@ -309,6 +309,19 @@ class MemoryStore(ABC):
     # Bulk Operations
     # =========================================================================
     
+    def clear(self) -> int:
+        """
+        Delete ALL memories from the store.
+        
+        This is a convenience method that calls delete_by_query with a 
+        match-all query.
+        
+        Returns:
+            The number of memories deleted.
+        """
+        # We assume an empty query matches everything
+        return self.delete_by_query(MemoryQuery())
+    
     @abstractmethod
     def delete_by_query(self, query: MemoryQuery) -> int:
         """
