@@ -1,12 +1,13 @@
 """
-Memory System Configuration
+Enhanced Memory System Configuration with Smart Path Resolution
 
-This module defines all configurable aspects of the memory system.
-Design goals:
-- Type-safe configuration using dataclasses
-- Sensible defaults that work out of the box
-- Easy to override for different environments
-- Clear documentation of what each setting does
+This module defines all configurable aspects of the memory system with added support for intelligent database path resolution following platform conventions.
+
+New Features:
+- Platform-specific user data directories
+- Environment variable overrides
+- Automatic directory creation
+- Fallback handling for edge cases
 
 SAFETY NOTE: This configuration controls security-sensitive features.
 Review carefully before changing defaults.
@@ -17,6 +18,7 @@ from enum import Enum
 from typing import Optional
 from datetime import timedelta
 import os
+from pathlib import Path
 
 
 class MemoryScope(Enum):
@@ -169,10 +171,16 @@ class SafetySettings:
 @dataclass  
 class MemoryConfig:
     """
-    Main configuration container.
+    Main configuration container with smart database path resolution.
+    
+    Features:
+    - Platform-appropriate default paths
+    - Environment variable overrides  
+    - Automatic directory creation
+    - Fallback handling
     
     Usage:
-        # Use defaults
+        # Use defaults (recommended)
         config = MemoryConfig()
         
         # Custom storage path
@@ -181,8 +189,8 @@ class MemoryConfig:
         # From environment variables
         config = MemoryConfig.from_env()
     """
-    # Storage
-    storage_path: str = "./data/memory.db"
+    # Storage - will be resolved to smart path if None
+    storage_path: Optional[str] = None
     storage_backend: str = "sqlite"  # Future: "postgres", "chromadb"
     
     # Default user/project (can be overridden per-operation)
@@ -197,14 +205,101 @@ class MemoryConfig:
     enable_semantic_search: bool = False  # Future: requires vector DB
     enable_auto_summarization: bool = False  # Future: summarize old convos
     
+    def __post_init__(self):
+        """Resolve storage path if not explicitly set and ensure directory exists."""
+        if self.storage_path is None:
+            self.storage_path = self._get_default_db_path()
+        else:
+            # Ensure directory exists for explicit paths too
+            storage_path = Path(self.storage_path)
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    def _get_default_db_path(self) -> str:
+        """
+        Get platform-appropriate default database path.
+        
+        Priority order:
+        1. OPTIMUS_MEMORY_PATH environment variable
+        2. Platform-specific user data directory
+        3. Fallback to project directory
+        
+        Returns:
+            str: Absolute path to database file
+        """
+        # Check for environment variable override first
+        if override_path := os.getenv("OPTIMUS_MEMORY_PATH"):
+            return str(Path(override_path).expanduser().resolve())
+        
+        try:
+            # Determine platform-appropriate base directory
+            if os.name == 'nt':  # Windows
+                base_dir = Path(os.getenv('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+            else:  # Linux/Mac
+                base_dir = Path.home()
+            
+            # Create the optimus_ai subdirectory path
+            app_data_dir = base_dir / '.optimus_ai'
+            db_path = app_data_dir / 'memory.db'
+            
+            # Ensure directory exists
+            app_data_dir.mkdir(parents=True, exist_ok=True)
+            
+            return str(db_path)
+            
+        except (PermissionError, OSError) as e:
+            # Fallback to project directory if user directory fails
+            print(f"Warning: Could not access user directory ({e}), falling back to project directory")
+            fallback_dir = Path.cwd() / 'data'
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            return str(fallback_dir / 'memory.db')
+    
     @classmethod
-    def from_env(cls) -> "MemoryConfig":
-        """Create configuration from environment variables."""
-        return cls(
-            storage_path=os.getenv("MEMORY_DB_PATH", "./data/memory.db"),
-            storage_backend=os.getenv("MEMORY_BACKEND", "sqlite"),
-            default_user_id=os.getenv("MEMORY_DEFAULT_USER", "default_user"),
-        )
+    def from_env(cls, **overrides) -> "MemoryConfig":
+        """
+        Create configuration from environment variables.
+        
+        Environment variables:
+        - OPTIMUS_MEMORY_PATH: Database file path
+        - OPTIMUS_MEMORY_BACKEND: Storage backend (sqlite, postgres, etc.)
+        - OPTIMUS_DEFAULT_USER: Default user ID
+        
+        Args:
+            **overrides: Direct overrides for any config field
+            
+        Returns:
+            MemoryConfig: Configuration instance
+        """
+        config_data = {
+            "storage_path": os.getenv("OPTIMUS_MEMORY_PATH"),
+            "storage_backend": os.getenv("OPTIMUS_MEMORY_BACKEND", "sqlite"),
+            "default_user_id": os.getenv("OPTIMUS_DEFAULT_USER", "default_user"),
+        }
+        
+        # Apply any direct overrides
+        config_data.update(overrides)
+        
+        # Filter out None values to let __post_init__ handle defaults
+        config_data = {k: v for k, v in config_data.items() if v is not None}
+        
+        return cls(**config_data)
+    
+    def get_storage_info(self) -> dict[str, str | bool]:
+        """
+        Get information about the storage configuration.
+        
+        Returns:
+            dict: Storage configuration details
+        """
+        storage_path = Path(self.storage_path)
+        return {
+            "storage_path": str(storage_path),
+            "storage_dir": str(storage_path.parent),
+            "database_name": storage_path.name,
+            "backend": self.storage_backend,
+            "directory_exists": storage_path.parent.exists(),
+            "database_exists": storage_path.exists(),
+            "is_override": bool(os.getenv("OPTIMUS_MEMORY_PATH")),
+        }
     
     def validate(self) -> list[str]:
         """
@@ -221,5 +316,12 @@ class MemoryConfig:
         
         if not self.safety.filter_sensitive_data:
             issues.append("SECURITY: Sensitive data filtering is disabled!")
+        
+        # Validate storage path accessibility
+        try:
+            storage_path = Path(self.storage_path)
+            storage_path.parent.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError) as e:
+            issues.append(f"ERROR: Cannot access storage directory: {e}")
         
         return issues

@@ -2,7 +2,7 @@ import hashlib
 import sqlite3
 import json
 from typing import Collection, List, Optional, Any, Tuple, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from memory.stores.base import MemoryStore
 from memory.models import Memory, User, Project, MemoryQuery
@@ -61,7 +61,7 @@ class SQLiteMemoryStore(MemoryStore):
                 )
             """)
 
-            # Memories Table
+            # Memories Table - Added missing fields
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
@@ -74,9 +74,12 @@ class SQLiteMemoryStore(MemoryStore):
                     tags TEXT,         -- Stored as JSON string
                     metadata TEXT,     -- Stored as JSON string
                     created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
                     expires_at TIMESTAMP,
                     last_accessed_at TIMESTAMP,
                     access_count INTEGER DEFAULT 0,
+                    importance REAL DEFAULT 0.5,
+                    source TEXT DEFAULT 'unknown',
                     FOREIGN KEY(user_id) REFERENCES users(id),
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 )
@@ -101,37 +104,54 @@ class SQLiteMemoryStore(MemoryStore):
             conditions.append("user_id = ?")  # The Rule
             params.append(query.user_id)      # The Data
             
-        if query.scopes:
-            placeholders = self._build_query_conditions_string(query.scopes)
-            conditions.append(f"scope IN {placeholders}")
-            params.extend(query.scopes)
-            
         if query.project_id:
             conditions.append("project_id = ?")
             params.append(query.project_id)
             
+        if query.scopes:
+            placeholders = self._build_query_conditions_string(query.scopes)
+            conditions.append(f"scope IN ({placeholders})")
+            params.extend([scope.value for scope in query.scopes])
+            
         if query.memory_types:
             placeholders = self._build_query_conditions_string(query.memory_types)
-            conditions.append(f"memory_type IN {placeholders}")
-            params.extend(query.memory_types)
+            conditions.append(f"memory_type IN ({placeholders})")
+            params.extend([memory_type.value for memory_type in query.memory_types])
             
         if query.retention_policies:
             placeholders = self._build_query_conditions_string(query.retention_policies)
-            conditions.append(f"retention_policy IN {placeholders}")
-            params.extend(query.retention_policies)
+            conditions.append(f"retention_policy IN ({placeholders})")
+            params.extend([policy.value for policy in query.retention_policies])
+
+        # Add time-based filters
+        if query.created_after:
+            conditions.append("created_at > ?")
+            params.append(query.created_after.isoformat())
+            
+        if query.created_before:
+            conditions.append("created_at < ?")
+            params.append(query.created_before.isoformat())
+            
+        # Handle expired filter
+        if not query.include_expired:
+            conditions.append("(expires_at IS NULL OR expires_at > ?)")
+            params.append(datetime.now().isoformat())
 
         if not conditions:
             return "", []
         
-        return f"WHERE {' AND '.join(conditions)}", params
+        return f" WHERE {' AND '.join(conditions)}", params
 
     def _build_query_conditions_string(self, query: List[Any]) -> str:
+        """Fixed: Create proper SQL placeholder string with parentheses for IN clauses."""
         return ", ".join(["?" for _ in query])
     
     def _row_to_memory(self, row: Tuple) -> Memory:
+        # Updated to handle all fields including the new ones
         (mem_id, content, scope_val, type_val, policy_val, 
          user_id, project_id, tags_json, metadata_json, 
-         created_at, expires_at, last_accessed, access_count) = row
+         created_at, updated_at, expires_at, last_accessed, access_count,
+         importance, source) = row
 
         scope_val = MemoryScope(scope_val)
         type_val = MemoryType(type_val)
@@ -148,6 +168,7 @@ class SQLiteMemoryStore(MemoryStore):
             metadata = {}
         
         created_at = datetime.fromisoformat(created_at)
+        updated_at = datetime.fromisoformat(updated_at)
         
         if expires_at:
             expires_at = datetime.fromisoformat(expires_at)
@@ -155,14 +176,20 @@ class SQLiteMemoryStore(MemoryStore):
         if last_accessed:
             last_accessed = datetime.fromisoformat(last_accessed)
             
-        return Memory(id=mem_id, content=content, memory_type=type_val, scope=scope_val, retention_policy=policy_val, user_id=user_id, project_id=project_id, created_at=created_at, expires_at=expires_at, access_count=access_count, last_accessed_at=last_accessed, tags=tags, metadata=metadata)
+        return Memory(
+            id=mem_id, content=content, memory_type=type_val, scope=scope_val, 
+            retention_policy=policy_val, user_id=user_id, project_id=project_id, 
+            created_at=created_at, updated_at=updated_at, expires_at=expires_at, 
+            access_count=access_count, last_accessed_at=last_accessed, tags=tags, 
+            metadata=metadata, importance=importance, source=source
+        )
 
     def get(self, memory_id: str) -> Optional[Memory]:
         query = "SELECT * FROM memories WHERE id = ?"
         row = self.conn.execute(query, (memory_id,)).fetchone()
         
         if not row:
-            return
+            return None
         else:
             return self._row_to_memory(row)
         
@@ -185,17 +212,26 @@ class SQLiteMemoryStore(MemoryStore):
 
         # Convert datetimes to ISO strings
         created_at = memory.created_at.isoformat()
+        updated_at = memory.updated_at.isoformat()
         
         # Handle optional datetimes
         expires_at = memory.expires_at.isoformat() if memory.expires_at else None
         last_accessed_at = memory.last_accessed_at.isoformat() if memory.last_accessed_at else None
 
-        # 2. Execute the INSERT
+        # 2. Execute the INSERT - Added missing fields
         query = """
-            INSERT INTO memories (id, content, user_id, project_id, access_count, scope, memory_type, retention_policy, tags, metadata, created_at, expires_at, last_accessed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO memories 
+            (id, content, scope, memory_type, retention_policy, user_id, project_id, 
+             tags, metadata, created_at, updated_at, expires_at, last_accessed_at, 
+             access_count, importance, source) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
-        values = (mem_id, content, user_id, project_id, access_count, scope, memory_type, retention_policy, tags, metadata, created_at, expires_at, last_accessed_at)
+        values = (
+            mem_id, content, scope, memory_type, retention_policy, user_id, project_id, 
+            tags, metadata, created_at, updated_at, expires_at, last_accessed_at, 
+            access_count, memory.importance, memory.source
+        )
 
         with self.conn:
             self.conn.execute(query, values)
@@ -205,7 +241,17 @@ class SQLiteMemoryStore(MemoryStore):
     def query(self, query: MemoryQuery) -> List[Memory]:
         base_query = "SELECT * FROM memories"
         condition, params = self._build_query_conditions(query)
-        final_query = base_query + condition
+        
+        # Add ordering
+        order_direction = "DESC" if query.order_desc else "ASC"
+        order_clause = f" ORDER BY {query.order_by} {order_direction}"
+        
+        # Add limit and offset
+        limit_clause = f" LIMIT {query.limit}"
+        if query.offset > 0:
+            limit_clause += f" OFFSET {query.offset}"
+        
+        final_query = base_query + condition + order_clause + limit_clause
         rows = self.conn.execute(final_query, params).fetchall()
         
         return [self._row_to_memory(row) for row in rows]
@@ -220,16 +266,15 @@ class SQLiteMemoryStore(MemoryStore):
         with self.conn:
             cursor = self.conn.execute(query, (memory_id,))
         
-        if cursor.rowcount == 0:
-            return False
-        else:
-            return True
+        return cursor.rowcount > 0
         
     def close(self) -> None:
         """
         Clean up resources and close connections.
         """
-        self.conn.close()
+        if self._conn:
+            self._conn.close()
+            self._conn = None
         
     def store_user(self, user: User) -> User:
         """
@@ -240,7 +285,7 @@ class SQLiteMemoryStore(MemoryStore):
         user_name = user.name
         created_at = user.created_at.isoformat()
         
-        query = "INSERT OR REPLACE INTO users (id, name, created_at) VALUES (?, ?, ?)"
+        query = "INSERT OR REPLACE INTO users (id, display_name, created_at) VALUES (?, ?, ?)"
         values = (user_id, user_name, created_at)
         
         with self.conn:
@@ -257,7 +302,7 @@ class SQLiteMemoryStore(MemoryStore):
         row = self.conn.execute(query, (user_id,)).fetchone()
         
         if not row:
-            return
+            return None
         else:
             return self._row_to_user(row)
     
@@ -266,11 +311,11 @@ class SQLiteMemoryStore(MemoryStore):
         Retrieve a user by their name.
         Returns: The user object if found, None otherwise
         """
-        query = "SELECT * FROM users WHERE name = ?"
+        query = "SELECT * FROM users WHERE display_name = ?"
         row = self.conn.execute(query, (name,)).fetchone()
         
         if not row:
-            return
+            return None
         else:
             return self._row_to_user(row)
     
@@ -312,7 +357,7 @@ class SQLiteMemoryStore(MemoryStore):
         row = self.conn.execute(query, (project_id,)).fetchone()
         
         if not row:
-            return
+            return None
         else:
             return self._row_to_project(row)
     
@@ -326,7 +371,7 @@ class SQLiteMemoryStore(MemoryStore):
         row = self.conn.execute(query, (path_hash,)).fetchone()
         
         if not row:
-            return
+            return None
         else:
             return self._row_to_project(row)
     
@@ -335,7 +380,8 @@ class SQLiteMemoryStore(MemoryStore):
         Convert a database row tuple to a Project object.
         Returns: The converted Project object
         """
-        project_id, project_name, path_hash, last_known_path, created_at = row
+        # Fixed: Match the actual column order from CREATE TABLE
+        project_id, path_hash, project_name, last_known_path, created_at = row
         created_at = datetime.fromisoformat(created_at)
         
         return Project(id=project_id, name=project_name, path_hash=path_hash, last_known_path=last_known_path, created_at=created_at)
@@ -356,29 +402,21 @@ class SQLiteMemoryStore(MemoryStore):
             return self.conn.execute(final_query, params).fetchone()[0]
             
     def delete_by_query(self, query: MemoryQuery) -> int:
+        """Delete memories matching a query using the same condition builder."""
         base_query = "DELETE FROM memories"
-        conditions = []
-        params = []
+        condition, params = self._build_query_conditions(query)
         
-        if query.user_id:
-            conditions.append("user_id = ?")
-            params.append(query.user_id)
-            
-        if query.project_id:
-            conditions.append("project_id = ?")
-            params.append(query.project_id)
-            
-        if conditions:
-            base_query += " WHERE " + " AND ".join(conditions)
-            
+        final_query = base_query + condition
+        
         with self.conn:
-            cursor = self.conn.execute(base_query, params)
+            cursor = self.conn.execute(final_query, params)
         
         return cursor.rowcount
     
     def delete_expired(self) -> int:
-        query = "DELETE FROM memories WHERE expires_at < ?"
-        curr_time = datetime.now()
+        """Fixed: Proper handling of NULL expires_at and datetime comparison."""
+        query = "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?"
+        curr_time = datetime.now(timezone.utc)
         
         with self.conn:
             cursor = self.conn.execute(query, (curr_time.isoformat(),))
@@ -386,11 +424,40 @@ class SQLiteMemoryStore(MemoryStore):
         return cursor.rowcount
     
     def get_stats(self) -> Dict:
-        # TO DO: Add more useful stats
-        count =  self.count()
-        stats_dict = {}
-        stats_dict["Total Memories"] = count
+        """Enhanced stats with more useful information."""
+        stats = {}
         
-        return stats_dict
-    
-    
+        # Total count
+        stats["Total Memories"] = self.count()
+        
+        # Count by type
+        stats["memories_by_type"] = {}
+        for memory_type in MemoryType:
+            query = MemoryQuery(memory_types=[memory_type])
+            count = self.count(query)
+            if count > 0:
+                stats["memories_by_type"][memory_type.value] = count
+        
+        # Count by scope
+        stats["memories_by_scope"] = {}
+        for scope in MemoryScope:
+            query = MemoryQuery(scopes=[scope])
+            count = self.count(query)
+            if count > 0:
+                stats["memories_by_scope"][scope.value] = count
+        
+        # Oldest and newest memories
+        try:
+            oldest = self.conn.execute("SELECT MIN(created_at) FROM memories").fetchone()[0]
+            newest = self.conn.execute("SELECT MAX(created_at) FROM memories").fetchone()[0]
+            
+            if oldest:
+                stats["oldest_memory"] = datetime.fromisoformat(oldest)
+            if newest:
+                stats["newest_memory"] = datetime.fromisoformat(newest)
+                
+        except Exception:
+            # Handle empty database gracefully
+            pass
+        
+        return stats
