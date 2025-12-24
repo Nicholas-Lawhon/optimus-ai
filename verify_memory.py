@@ -5,7 +5,7 @@ Run this to see your memory system in action!
 import os
 import shutil
 from memory.manager import MemoryManager
-from memory.config import MemoryConfig
+from memory.config import MemoryConfig, RetentionPolicy
 
 def verify_full_flow():
     print("🔬 Starting Memory Manager Verification...")
@@ -29,9 +29,42 @@ def verify_full_flow():
     )
     print("✅ Initialization complete")
 
-    # 3. Store some "Static" Context
+    # --- NEW: Verify User Tagging (Immutable Copy-on-Write) ---
+    print("\n🏷️  Testing User Tagging...")
+    manager.add_user_tag("power_user")
+    
+    if "power_user" in manager.current_user.tags:
+        print(f"✅ User tag 'power_user' added successfully. Tags: {manager.current_user.tags}")
+    else:
+        print("❌ User tag FAILED to add.")
+
+    # --- NEW: Verify Project Tagging (Mutable) ---
+    print("\n🏷️  Testing Project Tagging...")
+    # Access the project directly since it's now mutable (unfrozen)
+    manager.current_project.tags.append("active_development")
+    manager.current_project.tags.append("python_v3")
+    
+    # Save the update
+    manager.store.store_project(manager.current_project)
+    
+    # Reload to verify persistence
+    reloaded_project = manager.store.get_project(manager.current_project.id)
+    if "active_development" in reloaded_project.tags:
+        print(f"✅ Project tags saved successfully. Tags: {reloaded_project.tags}")
+    else:
+        print("❌ Project tags FAILED to save.")
+
+    # 3. Store Context & Preferences
     print("\n📝 Storing Context & Preferences...")
-    manager.store_user_preference("I prefer concise Python code.")
+    
+    # --- NEW: Verify Retention Policy ---
+    pref_memory = manager.store_user_preference("I prefer concise Python code.")
+    
+    if pref_memory.retention_policy == RetentionPolicy.LONG_TERM:
+        print(f"✅ User Preference correctly set to LONG_TERM retention.")
+    else:
+        print(f"❌ User Preference has wrong policy: {pref_memory.retention_policy}")
+
     manager.store_project_context("This project uses SQLite for storage.")
     manager.store_learned_correction(
         original_response="os.system('rm -rf /')", 

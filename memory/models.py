@@ -50,6 +50,7 @@ class User:
     id: str
     name: str
     created_at: datetime
+    tags: list[str] = field(default_factory=list)
     
     @classmethod
     def create(cls, name: str) -> "User":
@@ -89,7 +90,7 @@ class User:
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class Project:
     """
     Represents a project/codebase the agent is working on.
@@ -113,6 +114,7 @@ class Project:
     path_hash: str
     last_known_path: str
     created_at: datetime
+    tags: list[str] = field(default_factory=list)
     
     @classmethod
     def from_path(cls, absolute_path: str, hasher=None) -> "Project":
@@ -270,6 +272,7 @@ class Memory:
         source: str = "unknown",
         metadata: Optional[dict[str, Any]] = None,
         expires_at: Optional[datetime] = None,
+        retention_policy: RetentionPolicy = RetentionPolicy.SHORT_TERM
     ) -> "Memory":
         """
         Factory method to create a new memory with generated ID.
@@ -285,6 +288,7 @@ class Memory:
             source: Origin of this memory
             metadata: Additional structured data
             expires_at: When to auto-delete (None = use retention policy)
+            retention_policy: Optional retention policy setting
             
         Returns:
             New Memory instance
@@ -295,6 +299,7 @@ class Memory:
             content=content,
             memory_type=memory_type,
             scope=scope,
+            retention_policy=retention_policy,
             user_id=user_id,
             project_id=project_id,
             created_at=now,
@@ -414,6 +419,7 @@ class MemoryQuery:
     # Filter by ownership
     user_id: Optional[str] = None
     project_id: Optional[str] = None
+    include_no_project: bool = False
     
     # Filter by type/scope
     memory_types: Optional[list[MemoryType]] = None

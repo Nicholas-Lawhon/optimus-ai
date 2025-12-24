@@ -7,10 +7,11 @@ Or directly: python tests/memory/test_manager_quick.py
 
 import tempfile
 import os
+import shutil
+from datetime import datetime
 
 from memory.manager import MemoryManager
-from memory.config import MemoryConfig
-
+from memory.config import MemoryConfig, MemoryScope, MemoryType
 
 def test_manager_initialization():
     """Test that MemoryManager initializes correctly."""
@@ -45,23 +46,19 @@ def test_user_management():
             user = manager.get_or_create_user("Nick")
             assert user.name == "Nick"
             assert user.id.startswith("usr_")
-            print(f"  Created user: {user.id} ({user.name})")
             
             # Test idempotent behavior
             same_user = manager.get_or_create_user("Nick")
             assert same_user.id == user.id
-            print("  Idempotent creation: PASSED")
             
             # Test set_current_user
             manager.set_current_user(user)
             assert manager.current_user.id == user.id
-            print("  Set current user: PASSED")
             
             # Test lazy loading of default user
             manager2 = MemoryManager.initialize(config=config)
             default_user = manager2.current_user
             assert default_user.name == config.default_user_id
-            print(f"  Default user lazy-loaded: {default_user.name}")
             manager2.close()
         
         print("✅ User management: PASSED")
@@ -80,65 +77,78 @@ def test_project_management():
             project = manager.get_or_create_project("/home/nick/test-project")
             assert project.name == "test-project"
             assert project.id.startswith("proj_")
-            print(f"  Created project: {project.id} ({project.name})")
             
             # Test idempotent behavior
             same_project = manager.get_or_create_project("/home/nick/test-project")
             assert same_project.id == project.id
-            print("  Idempotent creation: PASSED")
             
             # Test set_current_project
             manager.set_current_project(project)
             assert manager.current_project.id == project.id
-            print("  Set current project: PASSED")
             
             # Test None project
             manager.set_current_project(None)
             assert manager.current_project is None
-            print("  Clear project: PASSED")
         
         print("✅ Project management: PASSED")
 
 
-def test_initialize_with_user_and_project():
-    """Test initialization with explicit user and project."""
-    print("\n🧪 Testing initialization with user and project...")
+def test_conversation_flow():
+    """Test storing conversations with different tags and scopes."""
+    print("\n🧪 Testing conversation storage (Chat vs Tool Use)...")
     
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = os.path.join(temp_dir, "test.db")
         config = MemoryConfig(storage_path=db_path)
         
-        with MemoryManager.initialize(
-            config=config,
-            user_name="Nick",
-            project_path="/home/nick/optimus-ai"
-        ) as manager:
-            assert manager.current_user.name == "Nick"
-            assert manager.current_project.name == "optimus-ai"
-            print(f"  User: {manager.current_user.name}")
-            print(f"  Project: {manager.current_project.name}")
+        # Initialize with a User but NO Project initially
+        manager = MemoryManager.initialize(
+            config=config, 
+            user_name="Tester"
+        )
         
-        print("✅ Full initialization: PASSED")
+        try:
+            # 1. Test USER Scope (No active project)
+            print("  Testing User-scoped chat...")
+            mem1 = manager.store_conversation(
+                user_message="Hello",
+                assistant_response="Hi there",
+                tags=["chat"]
+            )
+            
+            assert mem1.scope == MemoryScope.USER
+            assert "chat" in mem1.tags
+            assert mem1.user_id == manager.current_user.id
+            assert mem1.project_id is None
+            
+            # 2. Test PROJECT Scope (Activate project)
+            print("  Testing Project-scoped tool use...")
+            project = manager.get_or_create_project("/tmp/test_project")
+            manager.set_current_project(project)
+            
+            mem2 = manager.store_conversation(
+                user_message="List files",
+                assistant_response="Called Function: get_files_info",
+                tags=["tool_use"]
+            )
+            
+            assert mem2.scope == MemoryScope.PROJECT
+            assert "tool_use" in mem2.tags
+            assert mem2.project_id == project.id
+            assert mem2.user_id == manager.current_user.id # Should still have user
+            
+            # 3. Test Retrieval
+            print("  Testing Retrieval...")
+            # Should find mem2 because we are in the project
+            history = manager.get_recent_conversations(limit=5)
+            assert len(history) == 2
+            assert history[0].id == mem2.id  # Newest first
+            assert history[1].id == mem1.id
+            
+        finally:
+            manager.close()
 
-
-def test_context_manager():
-    """Test that context manager properly closes resources."""
-    print("\n🧪 Testing context manager...")
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        db_path = os.path.join(temp_dir, "test.db")
-        config = MemoryConfig(storage_path=db_path)
-        
-        manager = MemoryManager.initialize(config=config)
-        
-        with manager:
-            # Do something
-            _ = manager.current_user
-        
-        # After exiting, store should be closed
-        # We can't easily test this without accessing private state,
-        # but we can verify no exceptions were raised
-        print("✅ Context manager: PASSED")
+    print("✅ Conversation flow: PASSED")
 
 
 if __name__ == "__main__":
@@ -149,8 +159,7 @@ if __name__ == "__main__":
         test_manager_initialization()
         test_user_management()
         test_project_management()
-        test_initialize_with_user_and_project()
-        test_context_manager()
+        test_conversation_flow()
         
         print("\n" + "=" * 60)
         print("🎉 All quick validation tests passed!")

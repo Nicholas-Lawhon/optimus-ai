@@ -46,7 +46,8 @@ class SQLiteMemoryStore(MemoryStore):
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL
+                    created_at TIMESTAMP NOT NULL,
+                    tags TEXT 
                 )
             """)
 
@@ -57,7 +58,8 @@ class SQLiteMemoryStore(MemoryStore):
                     path_hash TEXT UNIQUE NOT NULL,
                     name TEXT NOT NULL,
                     last_known_path TEXT,
-                    created_at TIMESTAMP NOT NULL
+                    created_at TIMESTAMP NOT NULL,
+                    tags TEXT
                 )
             """)
 
@@ -105,8 +107,12 @@ class SQLiteMemoryStore(MemoryStore):
             params.append(query.user_id)      # The Data
             
         if query.project_id:
-            conditions.append("project_id = ?")
-            params.append(query.project_id)
+            if query.include_no_project:
+                conditions.append("(project_id = ? OR project_id IS NULL)")
+                params.append(query.project_id)
+            else:
+                conditions.append("project_id = ?")
+                params.append(query.project_id)
             
         if query.scopes:
             placeholders = self._build_query_conditions_string(query.scopes)
@@ -284,9 +290,10 @@ class SQLiteMemoryStore(MemoryStore):
         user_id = user.id
         user_name = user.name
         created_at = user.created_at.isoformat()
+        tags = json.dumps(user.tags)
         
-        query = "INSERT OR REPLACE INTO users (id, display_name, created_at) VALUES (?, ?, ?)"
-        values = (user_id, user_name, created_at)
+        query = "INSERT OR REPLACE INTO users (id, display_name, created_at, tags) VALUES (?, ?, ?, ?)"
+        values = (user_id, user_name, created_at, tags)
         
         with self.conn:
             self.conn.execute(query, values)
@@ -324,10 +331,11 @@ class SQLiteMemoryStore(MemoryStore):
         Convert a database row tuple to a User object.
         Returns: The converted User object
         """
-        user_id, user_name, created_at = row
+        user_id, user_name, created_at, tags_json = row
         created_at = datetime.fromisoformat(created_at)
+        tags = json.loads(tags_json) if tags_json else []
         
-        return User(id=user_id, name=user_name, created_at=created_at)
+        return User(id=user_id, name=user_name, created_at=created_at, tags=tags)
 
     def store_project(self, project: Project) -> Project:
         """
@@ -339,9 +347,10 @@ class SQLiteMemoryStore(MemoryStore):
         path_hash = project.path_hash
         last_known_path = project.last_known_path
         created_at = project.created_at.isoformat()
+        tags = json.dumps(project.tags)
         
-        query = "INSERT OR REPLACE INTO projects (id, name, path_hash, last_known_path, created_at) VALUES (?, ?, ?, ?, ?)"
-        values = (project_id, project_name, path_hash, last_known_path, created_at)
+        query = "INSERT OR REPLACE INTO projects (id, name, path_hash, last_known_path, created_at, tags) VALUES (?, ?, ?, ?, ?, ?)"
+        values = (project_id, project_name, path_hash, last_known_path, created_at, tags)
         
         with self.conn:
             self.conn.execute(query, values)
@@ -381,10 +390,11 @@ class SQLiteMemoryStore(MemoryStore):
         Returns: The converted Project object
         """
         # Fixed: Match the actual column order from CREATE TABLE
-        project_id, path_hash, project_name, last_known_path, created_at = row
+        project_id, path_hash, project_name, last_known_path, created_at, tags_json = row
         created_at = datetime.fromisoformat(created_at)
+        tags = json.loads(tags_json) if tags_json else []
         
-        return Project(id=project_id, name=project_name, path_hash=path_hash, last_known_path=last_known_path, created_at=created_at)
+        return Project(id=project_id, name=project_name, path_hash=path_hash, last_known_path=last_known_path, created_at=created_at, tags=tags)
     
     def count(self, query: Optional[MemoryQuery] = None) -> int:
         """

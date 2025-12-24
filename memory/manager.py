@@ -38,6 +38,7 @@ Usage:
 
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 
 from memory.config import MemoryConfig, MemoryType, MemoryScope, RetentionPolicy
@@ -214,6 +215,31 @@ class MemoryManager:
             user: The User object to set as current
         """
         self._current_user = user
+        
+    def add_user_tag(self, tag: str) -> User:
+        """
+        Add a tag to the current user using the copy-on-write pattern.
+        
+        Since User objects are immutable (frozen), we create a new instance
+        with the updated tag list, store it, and update the current session.
+        """
+        # 1. Check if tag already exists to avoid redundant writes
+        if tag in self.current_user.tags:
+            return self.current_user
+            
+        # 2. Create new tags list (User is frozen, so we make a new list)
+        new_tags = self.current_user.tags + [tag]
+        
+        # 3. Use 'replace' to create a new User instance with updated tags
+        updated_user = replace(self.current_user, tags=new_tags)
+        
+        # 4. Persist the new version to the database
+        self.store.store_user(updated_user)
+        
+        # 5. Update our current session reference
+        self._current_user = updated_user
+        
+        return updated_user
     
     @property
     def current_user(self) -> User:
@@ -334,11 +360,11 @@ class MemoryManager:
         - Expiration calculation
         - Object creation and storage
         """
-        # 1. Sanitize content to prevent secret leakage
+        # Sanitize content to prevent secret leakage
         sanitization_result = self.safety.sanitize_content(content)
         sanitized_content = sanitization_result.content
         
-        # 2. Determine ownership based on current context
+        # Determine ownership based on current context
         # Always attach user_id if we have a current user
         user_id = self.current_user.id if self.current_user else None
         
@@ -346,11 +372,22 @@ class MemoryManager:
         # (Even for USER scope, it's useful to know where it happened)
         project_id = self.current_project.id if self.current_project else None
         
-        # 3. Calculate expiration based on retention policy
+        # Calculate expiration based on retention policy
         ttl = self.config.retention.get_ttl(memory_type)
         expires_at = datetime.now(timezone.utc) + ttl
         
-        # 4. Create the memory object
+        # Determine the RetentionPolicy label based on type
+        policy_map = {
+            MemoryType.USER_PREFERENCE: RetentionPolicy.LONG_TERM,
+            MemoryType.LEARNED_CORRECTION: RetentionPolicy.LONG_TERM,
+            MemoryType.PROJECT_CONTEXT: RetentionPolicy.MEDIUM_TERM,
+            MemoryType.TOOL_PATTERN: RetentionPolicy.MEDIUM_TERM,
+            MemoryType.TASK_RESULT: RetentionPolicy.SHORT_TERM,
+            MemoryType.CONVERSATION: RetentionPolicy.SHORT_TERM,
+        }
+        policy = policy_map.get(memory_type, RetentionPolicy.SHORT_TERM)
+        
+        # Create the memory object
         memory = Memory.create(
             content=sanitized_content,
             memory_type=memory_type,
@@ -360,10 +397,11 @@ class MemoryManager:
             importance=importance,
             tags=tags,
             metadata=metadata or {},
-            expires_at=expires_at
+            expires_at=expires_at,
+            retention_policy=policy
         )
         
-        # 5. Persist to storage
+        # Persist to storage
         return self.store.store(memory)
     
     # =========================================================================
@@ -497,6 +535,7 @@ class MemoryManager:
         query = MemoryQuery(
             user_id=self.current_user.id,
             project_id=query_project_id,
+            include_no_project=True,
             memory_types=[MemoryType.CONVERSATION],
             limit=limit
         )
