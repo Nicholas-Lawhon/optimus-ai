@@ -3,6 +3,7 @@ from google import genai
 from google.genai import types
 from prompts import system_prompt
 from functions.call_function import available_functions, call_function
+from memory.manager import MemoryManager
 import argparse
 import os
 
@@ -23,6 +24,7 @@ def main():
     args = cli_parser.parse_args()
 
     messages = [types.Content(role="user", parts=[types.Part(text=args.user_prompt)])]
+    mem_manager = 
     
     for _ in range(20):
         try:

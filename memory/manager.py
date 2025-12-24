@@ -144,7 +144,7 @@ class MemoryManager:
         
         # Step 2: Create and initialize the storage backend
         # Note: config.storage_path is already resolved by MemoryConfig.__post_init__
-        store = SQLiteMemoryStore(config, config.storage_path)
+        store = SQLiteMemoryStore(config, config.storage_path or "memory.db")
         store.initialize()
         
         # Step 3: Create the safety guard using config's safety settings
@@ -311,3 +311,318 @@ class MemoryManager:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Context manager exit."""
         self.close()
+        
+    # =========================================================================
+    # Internal Helpers
+    # =========================================================================
+
+    def _create_and_store(
+        self,
+        content: str,
+        memory_type: MemoryType,
+        scope: MemoryScope,
+        importance: float,
+        metadata: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Memory:
+        """
+        Internal helper to centralize memory creation logic.
+        
+        Handles:
+        - Content sanitization (SECURITY)
+        - ID resolution (User/Project)
+        - Expiration calculation
+        - Object creation and storage
+        """
+        # 1. Sanitize content to prevent secret leakage
+        sanitization_result = self.safety.sanitize_content(content)
+        sanitized_content = sanitization_result.content
+        
+        # 2. Determine ownership based on current context
+        # Always attach user_id if we have a current user
+        user_id = self.current_user.id if self.current_user else None
+        
+        # Attach project_id if we have a current project
+        # (Even for USER scope, it's useful to know where it happened)
+        project_id = self.current_project.id if self.current_project else None
+        
+        # 3. Calculate expiration based on retention policy
+        ttl = self.config.retention.get_ttl(memory_type)
+        expires_at = datetime.now(timezone.utc) + ttl
+        
+        # 4. Create the memory object
+        memory = Memory.create(
+            content=sanitized_content,
+            memory_type=memory_type,
+            scope=scope,
+            user_id=user_id,
+            project_id=project_id,
+            importance=importance,
+            tags=tags or [],
+            metadata=metadata or {},
+            expires_at=expires_at
+        )
+        
+        # 5. Persist to storage
+        return self.store.store(memory)
+    
+    # =========================================================================
+    # High-Level Storage Operations
+    # =========================================================================
+
+    def store_conversation(
+        self,
+        user_message: str,
+        assistant_response: str,
+        importance: float = 0.1
+    ) -> Memory:
+        """
+        Store a chat exchange.
+        
+        Automatically determines scope:
+        - PROJECT scope if a project is active
+        - USER scope otherwise
+        """
+        # Format the interaction clearly
+        content = f"User: {user_message}\nAssistant: {assistant_response}"
+        
+        # Determine scope based on whether we are in a project
+        scope = MemoryScope.PROJECT if self.current_project else MemoryScope.USER
+        
+        return self._create_and_store(
+            content=content,
+            memory_type=MemoryType.CONVERSATION,
+            scope=scope,
+            importance=importance,
+            tags=["chat"]
+        )
+        
+    def store_user_preference(
+        self,
+        preference: str,
+        importance: float = 0.8
+    ) -> Memory:
+        """
+        Store a user preference or fact.
+        
+        Always USER scope so it follows the user across projects.
+        High default importance because these are explicit instructions.
+        """
+        return self._create_and_store(
+            content=preference,
+            memory_type=MemoryType.USER_PREFERENCE,
+            scope=MemoryScope.USER,
+            importance=importance,
+            tags=["preference", "personalization"]
+        )
+        
+    def store_project_context(
+        self,
+        context: str,
+        importance: float = 0.5
+    ) -> Memory:
+        """
+        Store information about the project structure or tech stack.
+        """
+        return self._create_and_store(
+            content=context,
+            memory_type=MemoryType.PROJECT_CONTEXT,
+            scope=MemoryScope.PROJECT,
+            importance=importance,
+            tags=["context", "architecture"]
+        )
+
+    def store_learned_correction(
+        self,
+        original_response: str,
+        correction: str,
+        importance: float = 0.9  # High default!
+    ) -> Memory:
+        """
+        Record when the user corrects the agent.
+        High importance ensures it's retrieved often.
+        """
+        # We combine them to give the agent full context of the mistake
+        content = f"Original: {original_response}\nCorrection: {correction}"
+        
+        return self._create_and_store(
+            content=content,
+            memory_type=MemoryType.LEARNED_CORRECTION,
+            scope=MemoryScope.USER,
+            importance=importance,
+            tags=["correction", "learning"]
+        )
+        
+    def store_tool_pattern(
+        self,
+        tool_name: str,
+        pattern: str,
+        success: bool = True,
+        importance: float = 0.5
+    ) -> Memory:
+        """
+        Record a successful tool usage pattern globally.
+        
+        Scope is GLOBAL because a good way to use a tool is valid 
+        regardless of the user or project.
+        """
+        content = f"Tool: {tool_name}\nPattern: {pattern}\nResult: {'Success' if success else 'Failure'}"
+        
+        return self._create_and_store(
+            content=content,
+            memory_type=MemoryType.TOOL_PATTERN,
+            scope=MemoryScope.GLOBAL,
+            importance=importance,
+            tags=["tool", "pattern", tool_name]
+        )
+        
+    def get_recent_conversations(
+        self, 
+        limit: int = 10, 
+        include_project: bool = True
+    ) -> List[Memory]:
+        """
+        Retrieve recent chat history.
+        
+        Args:
+            limit: Max number of messages to return
+            include_project: If True, filter by current project (if active)
+        """
+        query_project_id = self.current_project.id if include_project and self.current_project else None
+        
+        query = MemoryQuery(
+            user_id=self.current_user.id,
+            project_id=query_project_id,
+            memory_types=[MemoryType.CONVERSATION],
+            limit=limit
+        )
+        
+        return self.store.query(query)
+    
+    def get_project_context(self) -> List[Memory]:
+        """
+        Retrieve context for the current active project.
+        Returns empty list if no project is active.
+        """
+        if not self.current_project:
+            return []
+        
+        query = MemoryQuery(
+            user_id=self.current_user.id,
+            project_id=self.current_project.id,
+            memory_types=[MemoryType.PROJECT_CONTEXT]
+        )
+        
+        return self.store.query(query)
+        
+    def get_user_preferences(self) -> List[Memory]:
+        """
+        Retrieve all preferences for the current user.
+        """
+        query = MemoryQuery(
+            user_id=self.current_user.id,
+            memory_types=[MemoryType.USER_PREFERENCE]
+        )
+        
+        return self.store.query(query)
+    
+    def get_relevant_corrections(
+        self,
+        limit: int = 10
+    ) -> List[Memory]:
+        """
+        Retrieve recent corrections to prevent repeating mistakes.
+        """
+        query = MemoryQuery(
+            user_id=self.current_user.id,
+            memory_types=[MemoryType.LEARNED_CORRECTION],
+            limit=limit
+        )
+        
+        return self.store.query(query)
+    
+    def build_context_string(
+        self,
+        include_preferences: bool = True,
+        include_project: bool = True,
+        include_history: bool = True,
+        include_corrections: bool = True,
+        max_chars: Optional[int] = None
+    ) -> str:
+        """
+        Build a context string for the LLM prompt.
+        Prioritizes content in this order:
+        1. Learned Corrections (Critical)
+        2. User Preferences (Personalization)
+        3. Project Context (Background)
+        4. Conversation History (Fills remaining space)
+        """
+        # Resolve limit from config if not provided
+        if max_chars is None:
+            max_chars = self.config.limits.max_context_chars
+            
+        parts = []
+        current_chars = 0
+        
+        # Helper to safely add sections (for the first 3 types)
+        def add_section(header: str, items: List[Memory]):
+            nonlocal current_chars
+            if not items:
+                return
+            
+            # Format: "- Content"
+            section_content = "\n".join([f"- {m.content}" for m in items])
+            section_text = f"\n=== {header} ===\n{section_content}\n"
+            
+            # Only add if it fits
+            if current_chars + len(section_text) <= max_chars:
+                parts.append(section_text)
+                current_chars += len(section_text)
+        
+        # --- PHASE 1: Retrieve Data ---
+        # Fetch a reasonable batch of history (e.g., 50) and let the squeezer filter it
+        history = self.get_recent_conversations(limit=50) if include_history else []
+        corrections = self.get_relevant_corrections() if include_corrections else []
+        preferences = self.get_user_preferences() if include_preferences else []
+        project_context = self.get_project_context() if include_project else []
+        
+        # --- PHASE 2: Assemble (Fixed Sections First) ---
+        
+        # 1. Corrections (High Priority)
+        add_section("Learned Corrections", corrections)
+        
+        # 2. Preferences (High Priority)
+        add_section("User Preferences", preferences)
+        
+        # 3. Project Context (Medium Priority - takes precedence over old history)
+        add_section("Project Context", project_context)
+        
+        # --- PHASE 3: The "Squeeze" (History) ---
+        
+        if history:
+            remaining_chars = max_chars - current_chars
+            
+            # If we have no space left, we have to skip history
+            if remaining_chars < 100: # Buffer for header
+                print("Warning: Context full, skipping history")
+            else:
+                # Temp list to hold the messages we select
+                selected_history = []
+                
+                # Iterate through history (which is stored Newest -> Oldest)
+                for mem in history:
+                    # Calculate size of this memory entry (plus a little for formatting)
+                    # We estimate roughly 10 chars overhead for "- " and "\n"
+                    mem_size = len(mem.content) + 10
+                    
+                    if mem_size <= remaining_chars:
+                        selected_history.append(mem)
+                        remaining_chars -= mem_size
+                    else:
+                        # If the next newest message is too big, we stop.
+                        # This prevents "gaps" in the conversation.
+                        break
+                    
+                add_section("Conversation History", selected_history[::-1])
+                
+        return "".join(parts).strip()

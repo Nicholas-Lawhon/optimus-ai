@@ -10,7 +10,7 @@ from memory.config import MemoryConfig, MemoryScope, MemoryType, RetentionPolicy
 
 
 class SQLiteMemoryStore(MemoryStore):
-    def __init__(self, config: MemoryConfig, db_path: str = "optimus.db"):
+    def __init__(self, config: MemoryConfig, db_path: str = "memory.db"):
         self.config = config
         self.db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
