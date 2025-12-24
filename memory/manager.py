@@ -358,7 +358,7 @@ class MemoryManager:
             user_id=user_id,
             project_id=project_id,
             importance=importance,
-            tags=tags or [],
+            tags=tags,
             metadata=metadata or {},
             expires_at=expires_at
         )
@@ -374,7 +374,8 @@ class MemoryManager:
         self,
         user_message: str,
         assistant_response: str,
-        importance: float = 0.1
+        importance: float = 0.1,
+        tags: list[str] | str = "chat"
     ) -> Memory:
         """
         Store a chat exchange.
@@ -389,12 +390,15 @@ class MemoryManager:
         # Determine scope based on whether we are in a project
         scope = MemoryScope.PROJECT if self.current_project else MemoryScope.USER
         
+        if isinstance(tags, str):
+            tags = [tags]
+        
         return self._create_and_store(
             content=content,
             memory_type=MemoryType.CONVERSATION,
             scope=scope,
             importance=importance,
-            tags=["chat"]
+            tags=tags
         )
         
     def store_user_preference(
