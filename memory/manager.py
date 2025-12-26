@@ -517,6 +517,18 @@ class MemoryManager:
             importance=importance,
             tags=["tool", "pattern", tool_name]
         )
+    
+    def get_tool_patterns(self, limit: int = 5) -> List[Memory]:
+        """
+        Retrieve successful tool usage patterns to guide the agent.
+        """
+        query = MemoryQuery(
+            scopes=[MemoryScope.GLOBAL],
+            memory_types=[MemoryType.TOOL_PATTERN],
+            limit=limit
+        )
+
+        return self.store.query(query)
         
     def get_recent_conversations(
         self, 
@@ -590,15 +602,17 @@ class MemoryManager:
         include_project: bool = True,
         include_history: bool = True,
         include_corrections: bool = True,
+        include_tool_pattern: bool = True,
         max_chars: Optional[int] = None
     ) -> str:
         """
         Build a context string for the LLM prompt.
         Prioritizes content in this order:
         1. Learned Corrections (Critical)
-        2. User Preferences (Personalization)
-        3. Project Context (Background)
-        4. Conversation History (Fills remaining space)
+        2. Tool Patterns (Critical)
+        3. User Preferences (Personalization)
+        4. Project Context (Background)
+        5. Conversation History (Fills remaining space)
         """
         # Resolve limit from config if not provided
         if max_chars is None:
@@ -628,16 +642,20 @@ class MemoryManager:
         corrections = self.get_relevant_corrections() if include_corrections else []
         preferences = self.get_user_preferences() if include_preferences else []
         project_context = self.get_project_context() if include_project else []
+        tool_pattern = self.get_tool_patterns() if include_tool_pattern else []
         
         # --- PHASE 2: Assemble (Fixed Sections First) ---
         
         # 1. Corrections (High Priority)
         add_section("Learned Corrections", corrections)
+
+        # 2. Tool Patterns (High Priority)
+        add_section("Tool Patterns", tool_pattern)
         
-        # 2. Preferences (High Priority)
+        # 3. Preferences (High Priority)
         add_section("User Preferences", preferences)
         
-        # 3. Project Context (Medium Priority - takes precedence over old history)
+        # 4. Project Context (Medium Priority - takes precedence over old history)
         add_section("Project Context", project_context)
         
         # --- PHASE 3: The "Squeeze" (History) ---

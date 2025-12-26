@@ -4,6 +4,7 @@ from google.genai import types
 from prompts import SYSTEM_PROMPT
 from functions.call_function import available_functions, call_function
 from memory.manager import MemoryManager
+from typing import Optional
 import argparse
 import os
 
@@ -35,12 +36,12 @@ def main() -> None:
     for _ in range(20):
         try:
             # Build Context & Config
-            context = mem_manager.build_context_string(max_chars=8000)
+            context = mem_manager.build_context_string(max_chars=30000)
             full_system_instructions = f"{SYSTEM_PROMPT}\n\n{context}"
             config = types.GenerateContentConfig(tools=[available_functions], system_instruction=full_system_instructions)
             
             # Generate Response
-            response = generate_content(client, messages, config, args.verbose, args.user_prompt)
+            response = generate_content(client, messages, config, args.verbose, args.user_prompt, mem_manager=mem_manager)
             
             finished = is_model_finished(response)
             
@@ -74,7 +75,6 @@ def main() -> None:
                 
                 # Extract Function Name Safely
                 last_msg = messages[-2]
-                print(f"messages[-1]: {last_msg}")  # For Debugging
                 fn_name = "Unknown Tool"
                 if last_msg.parts and last_msg.parts[0].function_call:
                     fn_name = last_msg.parts[0].function_call.name
@@ -128,7 +128,8 @@ def generate_content(
     messages: list[types.Content], 
     config: types.GenerateContentConfig, 
     verbose: bool, 
-    user_prompt: str
+    user_prompt: str,
+    mem_manager: Optional[MemoryManager] = None
 ) -> types.GenerateContentResponse:
     """
     Send the conversation history to the model and handle the response.
@@ -175,6 +176,11 @@ def generate_content(
     # Handle Tool Execution
     if response.function_calls:
         for function_call in response.function_calls:
+
+            cmd_name = function_call.name or ""
+            cmd_args = function_call.args
+            pattern_str = f"{cmd_name}({cmd_args})"
+
             function_call_result = call_function(function_call, verbose=verbose)
 
             if not function_call_result.parts:
@@ -185,8 +191,22 @@ def generate_content(
             if not hasattr(part, "function_response") or part.function_response is None or part.function_response.response is None:
                 raise Exception("Function call did not return a valid response")
             
+            # --- DEBUGGING TRIPWIRE ---
             if verbose:
-                print(f"-> {part.function_response.response}")
+                print(f"DEBUG: mem_manager is {mem_manager}")
+                print(f"DEBUG: Attempting to store pattern for {cmd_name}")
+            # --------------------------
+
+            if mem_manager:
+                mem_manager.store_tool_pattern(
+                    tool_name=cmd_name,
+                    pattern=pattern_str,
+                    success=True,
+                    importance=0.4
+                )
+            
+            if verbose:
+                print(f"Stored tool pattern: {pattern_str}")
 
             function_call_parts.append(part)
     else:
