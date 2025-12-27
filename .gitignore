@@ -1,3 +1,33 @@
-.venv
-.ven
+# --- Python Internals ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+.ven/
+
+# --- Environment Variables ---
 .env
+
+# --- Database ---
+*.db
+*.sqlite3
+*.sqlite
+
+# --- Testing & Quality ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Distribution / Builds ---
+build/
+dist/
+*.egg-info/
+
+# --- OS & IDE Metadata ---
+.DS_Store
+.vscode/
+.idea/

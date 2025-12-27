@@ -190,19 +190,16 @@ def generate_content(
 
             if not hasattr(part, "function_response") or part.function_response is None or part.function_response.response is None:
                 raise Exception("Function call did not return a valid response")
-            
-            # --- DEBUGGING TRIPWIRE ---
-            if verbose:
-                print(f"DEBUG: mem_manager is {mem_manager}")
-                print(f"DEBUG: Attempting to store pattern for {cmd_name}")
-            # --------------------------
 
             if mem_manager:
+                response_dict = part.function_response.response
+                is_success = "error" not in response_dict
+
                 mem_manager.store_tool_pattern(
                     tool_name=cmd_name,
                     pattern=pattern_str,
-                    success=True,
-                    importance=0.4
+                    success=is_success,
+                    importance=0.5 if is_success else 0.1
                 )
             
             if verbose:
@@ -213,8 +210,10 @@ def generate_content(
         print(f"Response:\n", response.text)
     
     # Append Assistant Responses to History
-    for ai_response in response.candidates:
-        messages.append(ai_response.content)
+    if response.candidates:
+        for ai_response in response.candidates:
+            if ai_response.content:
+                messages.append(ai_response.content)
     
     # Append Tool Results to History (if any)
     if function_call_parts:
