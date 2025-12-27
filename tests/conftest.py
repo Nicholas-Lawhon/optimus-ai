@@ -1,9 +1,5 @@
 """
 Pytest configuration for the test suite.
-
-This file is automatically loaded by pytest and handles:
-- Adding project root to Python path
-- Shared fixtures across all tests
 """
 
 import sys
