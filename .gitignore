@@ -16,6 +16,7 @@ env/
 *.db
 *.sqlite3
 *.sqlite
+/data/
 
 # --- Testing & Quality ---
 .pytest_cache/

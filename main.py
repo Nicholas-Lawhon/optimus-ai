@@ -6,6 +6,7 @@ from functions.call_function import available_functions, call_function
 from memory.manager import MemoryManager
 from typing import Optional
 import argparse
+import sys
 import os
 
 
@@ -18,6 +19,30 @@ if not api_key:
 client = genai.Client(api_key=api_key)
 
 
+# === UI / Formatting ===
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+
+def print_tool_log(message: str):
+    print(f"{Colors.YELLOW}{Colors.DIM}  → {message}{Colors.ENDC}")
+
+def print_ai(message: str):
+    print(f"\n{Colors.BLUE}Optimus:{Colors.ENDC} {message}")
+
+def print_user(message: str):
+    print(f"\n{Colors.GREEN}You:{Colors.ENDC} {message}") 
+
+
+# === Main Logic ===
+
 def main() -> None:
     """
     Main entry point for the Optimus AI agent.
@@ -26,82 +51,126 @@ def main() -> None:
     agentic loop (up to 20 iterations).
     """
     cli_parser = argparse.ArgumentParser(description="Chatbot")
-    cli_parser.add_argument("user_prompt", type=str, help="User prompt")
     cli_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     args = cli_parser.parse_args()
 
-    messages = [types.Content(role="user", parts=[types.Part(text=args.user_prompt)])]
     mem_manager = MemoryManager.initialize()
     
-    for _ in range(20):
+    messages = []
+    
+    print(f"{Colors.BOLD}Optimus AI is ready.{Colors.ENDC} Type 'exit' to quit, or 'correction' to fix.")
+    
+    # === OUTER LOOP: The Conversation Session ===
+    while True:
         try:
-            # Build Context & Config
-            context = mem_manager.build_context_string(max_chars=30000)
-            full_system_instructions = f"{SYSTEM_PROMPT}\n\n{context}"
-            config = types.GenerateContentConfig(tools=[available_functions], system_instruction=full_system_instructions)
+            # Get User Input
+            user_input = input(f"\n{Colors.GREEN}You:{Colors.ENDC} ").strip()
             
-            # Generate Response
-            response = generate_content(client, messages, config, args.verbose, args.user_prompt, mem_manager=mem_manager)
-            
-            finished = is_model_finished(response)
-            
-            if finished:
-                # The prompt that triggered this might be a human or a tool result
-                
-                ai_text = response.text or "No response text."
-                
-                # Check previous message to see if it was a tool output
-                last_event = messages[-2]
-                if last_event.parts and last_event.parts[0].function_response:
-                    user_text = f"Tool Output: {last_event.parts[0].function_response}"    
-                elif last_event.parts:
-                    user_text = last_event.parts[0].text or ""
-                else:
-                    user_text = "Unknown User Input"
-                    
-                # Store as CHAT
-                mem_manager.store_conversation(
-                    user_message=user_text,
-                    assistant_response=ai_text,
-                    tags=["chat"]
-                )
-                
-                print("Final Response")
-                print(ai_text)
+            if user_input.lower() in ['exit', 'quit']:
+                print("Goodbye!")
                 break
             
-            else:
-                # The AI wants to run a tool call
+            # Correction Logic
+            if user_input.lower() == 'correction':
+                last_ai_content = None
+                last_ai_index = -1
                 
-                # Extract Function Name Safely
-                last_msg = messages[-2]
-                fn_name = "Unknown Tool"
-                if last_msg.parts and last_msg.parts[0].function_call:
-                    fn_name = last_msg.parts[0].function_call.name
+                for i, m in enumerate(reversed(messages)):
+                    if m.role == "model":
+                        last_ai_content = m.parts[0].text
+                        last_ai_index = len(messages) - 1 - i
+                        break
                 
-                tool_log = f"Called Function: {fn_name}"
+                if not last_ai_content:
+                    print(f"{Colors.RED}>> No previous AI response to correct.{Colors.ENDC}")
+                    continue
+
+                print(f"{Colors.DIM}I said: {last_ai_content[:50]}...{Colors.ENDC}")
+                correction = input(f"{Colors.YELLOW}Correction: {Colors.ENDC}").strip()
                 
-                # The user message that prompted the tool call
-                last_event = messages[-3]
-                if last_event.parts and last_event.parts[0].function_response:
-                    user_text = f"Tool Output: {last_event.parts[0].function_response.response}"
-                elif last_event.parts:
-                    user_text = last_event.parts[0].text or ""
-                else:
-                    user_text = "Unknown User Input"
-            
-                # Store as TOOL_USE
-                mem_manager.store_conversation(
-                    user_message=user_text,
-                    assistant_response=tool_log,
-                    tags=["tool_use"]
+                mem_manager.store_learned_correction(
+                    original_response=last_ai_content,
+                    correction=correction
                 )
+                
+                # Soft delete the bad memory
+                # This ensures future sessions won't remember it
+                mem_manager.soft_delete_last_conversation()
+                
+                # Hard delete the bad memory from the active session
+                # This ensures the next prompt won't see it
+                if last_ai_index != -1:
+                    messages.pop(last_ai_index)
                     
-        except Exception as e:
-            print(f"Error: {e}")
+                    # Try to remove the user message that triggered the correction
+                    if last_ai_index > 0 and messages[last_ai_index - 1].role == "user":
+                        messages.pop(last_ai_index - 1)
+                
+                print(f"{Colors.DIM}>> Correction stored.{Colors.ENDC}")
+                continue 
+
+            #print() # Visual Separator
+
+            messages.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
             
-    else:
-        print("Model reached the max iteration limit")
+            # === INNER LOOP ===
+            agent_turn_finished = False
+            for _ in range(20):
+                # Build Context
+                context = mem_manager.build_context_string(max_chars=30000)
+                full_system_instructions = f"{SYSTEM_PROMPT}\n\n{context}"
+                config = types.GenerateContentConfig(
+                    tools=[available_functions], 
+                    system_instruction=full_system_instructions
+                )
+                
+                # Generate Response
+                response = generate_content(
+                    client, 
+                    messages, 
+                    config, 
+                    args.verbose, 
+                    user_prompt=user_input, 
+                    mem_manager=mem_manager
+                )
+                
+                finished = is_model_finished(response)
+                
+                if finished:
+                    # Capture the final answer
+                    ai_text = response.text or "No response text."
+                    print(f"\n{Colors.BLUE}Optimus:{Colors.ENDC} {ai_text}")
+                    
+                    # --- MEMORY STORAGE (Chat) ---
+                    last_user_text = "Unknown"
+                    for m in reversed(messages[:-1]):
+                        if m.role == "user":
+                            # Check if it was a tool output or text
+                            if m.parts and m.parts[0].function_response:
+                                last_user_text = f"Tool Output: {m.parts[0].function_response}"
+                            elif m.parts:
+                                last_user_text = m.parts[0].text
+                            break
+                        
+                    # Store as CHAT
+                    mem_manager.store_conversation(
+                        user_message=last_user_text,
+                        assistant_response=ai_text,
+                        tags=["chat"]
+                    )
+                    
+                    agent_turn_finished = True
+                    break
+                
+            # End of Inner Loop    
+            if not agent_turn_finished:
+                print(f"{Colors.RED}Agent reached max iteration limit.{Colors.ENDC}")
+                    
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            break                
+        except Exception as e:
+            print(f"{Colors.RED}Error: {e}{Colors.ENDC}")
             
             
 def is_model_finished(response: types.GenerateContentResponse) -> bool:
@@ -157,19 +226,9 @@ def generate_content(
         config=config,
     )
     
-    if not response.usage_metadata:
-        raise RuntimeError("No usage metadata. This is likely due to a failed API call.")
-
-    prompt_token_count = response.usage_metadata.prompt_token_count
-    response_token_count = response.usage_metadata.candidates_token_count
-
-    if not prompt_token_count or not response_token_count:
-        raise RuntimeError("No prompt or response token count. This is likely due to a failed API call.")
-    
-    if verbose:
-        print(f"User prompt: {user_prompt}\n"
-            f"Prompt tokens: {prompt_token_count}\n"
-            f"Response tokens: {response_token_count}\n")
+    # Verbose logging for tokens
+    if verbose and response.usage_metadata:
+        print(f"{Colors.DIM}[Tokens: Prompt={response.usage_metadata.prompt_token_count}, Resp={response.usage_metadata.candidates_token_count}]{Colors.ENDC}")
     
     function_call_parts = []
     
@@ -179,35 +238,35 @@ def generate_content(
 
             cmd_name = function_call.name or ""
             cmd_args = function_call.args
-            pattern_str = f"{cmd_name}({cmd_args})"
-
-            function_call_result = call_function(function_call, verbose=verbose)
+            
+            # --- CUSTOM UI LOGGING ---
+            if verbose:
+                print_tool_log(f"Running: {cmd_name}({cmd_args})")
+            
+            # Call function with verbose=False to suppress its internal print
+            function_call_result = call_function(function_call, verbose=False)
 
             if not function_call_result.parts:
                 raise Exception("Function call did not return any parts")
 
             part = function_call_result.parts[0]
-
-            if not hasattr(part, "function_response") or part.function_response is None or part.function_response.response is None:
-                raise Exception("Function call did not return a valid response")
-
-            if mem_manager:
+            
+            # Memory pattern logic
+            if mem_manager and hasattr(part, "function_response"):
                 response_dict = part.function_response.response
                 is_success = "error" not in response_dict
-
+                
+                pattern_str = f"{cmd_name}({cmd_args})"
                 mem_manager.store_tool_pattern(
                     tool_name=cmd_name,
                     pattern=pattern_str,
                     success=is_success,
                     importance=0.5 if is_success else 0.1
                 )
-            
-            if verbose:
-                print(f"Stored tool pattern: {pattern_str}")
+                if verbose:
+                    print_tool_log(f"Learned pattern: {pattern_str}")
 
             function_call_parts.append(part)
-    else:
-        print(f"Response:\n", response.text)
     
     # Append Assistant Responses to History
     if response.candidates:

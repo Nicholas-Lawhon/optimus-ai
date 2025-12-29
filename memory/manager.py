@@ -439,6 +439,38 @@ class MemoryManager:
             tags=tags
         )
         
+    def soft_delete_last_conversation(self) -> bool:
+        """
+        Marks the most recent conversation as 'ignored' so it's excluded from context
+        but preserved for audit/training.
+        """
+        # 1. Get the absolute last conversation directly from store
+        # We bypass get_recent_conversations to ensure we see raw data
+        query = MemoryQuery(
+            user_id=self.current_user.id,
+            include_no_project=True,
+            memory_types=[MemoryType.CONVERSATION],
+            limit=1
+        )
+        results = self.store.query(query)
+        
+        if not results:
+            return False
+            
+        last_mem = results[0]
+        
+        # 2. Check if already ignored to avoid redundant writes
+        current_tags = last_mem.tags or []
+        if "ignore" in current_tags:
+            return False
+            
+        # 3. Add the tag and save
+        new_tags = current_tags + ["ignore"]
+        updated_mem = replace(last_mem, tags=new_tags)
+        self.store.store(updated_mem)
+        
+        return True
+        
     def store_user_preference(
         self,
         preference: str,
@@ -537,22 +569,27 @@ class MemoryManager:
     ) -> List[Memory]:
         """
         Retrieve recent chat history.
-        
-        Args:
-            limit: Max number of messages to return
-            include_project: If True, filter by current project (if active)
+        Filters out memories tagged with 'ignore'.
         """
         query_project_id = self.current_project.id if include_project and self.current_project else None
         
+        # We fetch a slightly larger batch (limit + 5) to account for 
+        # potentially ignored items, ensuring we still return a full 'limit'
         query = MemoryQuery(
             user_id=self.current_user.id,
             project_id=query_project_id,
             include_no_project=True,
             memory_types=[MemoryType.CONVERSATION],
-            limit=limit
+            limit=limit + 5 
         )
         
-        return self.store.query(query)
+        memories = self.store.query(query)
+        
+        # Filter out any memory that has the 'ignore' tag
+        valid_memories = [m for m in memories if "ignore" not in (m.tags or [])]
+        
+        # Return only the requested amount
+        return valid_memories[:limit]
     
     def get_project_context(self) -> List[Memory]:
         """
@@ -608,82 +645,89 @@ class MemoryManager:
         """
         Build a context string for the LLM prompt.
         Prioritizes content in this order:
+        
         1. Learned Corrections (Critical)
-        2. Tool Patterns (Critical)
+        2. Tool Patterns (High Importance)
         3. User Preferences (Personalization)
         4. Project Context (Background)
         5. Conversation History (Fills remaining space)
+        
+        Learned Corrections are added at the end of the context window to avoid recency bias
         """
         # Resolve limit from config if not provided
         if max_chars is None:
             max_chars = self.config.limits.max_context_chars
             
-        parts = []
-        current_chars = 0
-        
-        # Helper to safely add sections (for the first 3 types)
-        def add_section(header: str, items: List[Memory]):
-            nonlocal current_chars
-            if not items:
-                return
-            
-            # Format: "- Content"
-            section_content = "\n".join([f"- {m.content}" for m in items])
-            section_text = f"\n=== {header} ===\n{section_content}\n"
-            
-            # Only add if it fits
-            if current_chars + len(section_text) <= max_chars:
-                parts.append(section_text)
-                current_chars += len(section_text)
-        
         # --- PHASE 1: Retrieve Data ---
-        # Fetch a reasonable batch of history (e.g., 50) and let the squeezer filter it
         history = self.get_recent_conversations(limit=50) if include_history else []
         corrections = self.get_relevant_corrections() if include_corrections else []
         preferences = self.get_user_preferences() if include_preferences else []
         project_context = self.get_project_context() if include_project else []
         tool_pattern = self.get_tool_patterns() if include_tool_pattern else []
         
-        # --- PHASE 2: Assemble (Fixed Sections First) ---
+        # --- PHASE 2: Prepare the "Anchor" (Corrections) ---
+        # We build this string FIRST to know exactly how much space to reserve
+        corrections_text = ""
+        if corrections:
+            section_content = "\n".join([f"- {m.content}" for m in corrections])
+            # We add a strong header to emphasize this section overrides others
+            corrections_text = f"\n=== Learned Corrections (CRITICAL - OVERRIDES HISTORY) ===\n{section_content}\n"
+            
+        # Calculate remaining space for everything else
+        reserved_chars = len(corrections_text)
+        available_chars = max_chars - reserved_chars
         
-        # 1. Corrections (High Priority)
-        add_section("Learned Corrections", corrections)
+        # --- PHASE 3: Build the Body (Standard Priority) ---
+        parts = []
+        current_chars = 0
+        
+        # Helper to safely add sections
+        def add_section(header: str, items: List[Memory]):
+            nonlocal current_chars
+            if not items:
+                return
+            
+            section_content = "\n".join([f"- {m.content}" for m in items])
+            section_text = f"\n=== {header} ===\n{section_content}\n"
+            
+            # Only add if it fits in the AVAILABLE space (excluding reserved correction space)
+            if current_chars + len(section_text) <= available_chars:
+                parts.append(section_text)
+                current_chars += len(section_text)
 
-        # 2. Tool Patterns (High Priority)
+        # 1. Tool Patterns
         add_section("Tool Patterns", tool_pattern)
         
-        # 3. Preferences (High Priority)
+        # 2. User Preferences
         add_section("User Preferences", preferences)
         
-        # 4. Project Context (Medium Priority - takes precedence over old history)
+        # 3. Project Context
         add_section("Project Context", project_context)
         
-        # --- PHASE 3: The "Squeeze" (History) ---
-        
+        # 4. Conversation History (The Squeeze)
         if history:
-            remaining_chars = max_chars - current_chars
+            remaining_chars = available_chars - current_chars
             
-            # If we have no space left, we have to skip history
-            if remaining_chars < 100: # Buffer for header
-                print("Warning: Context full, skipping history")
-            else:
-                # Temp list to hold the messages we select
+            if remaining_chars >= 100: # Ensure we have at least a little room
                 selected_history = []
-                
-                # Iterate through history (which is stored Newest -> Oldest)
                 for mem in history:
-                    # Calculate size of this memory entry (plus a little for formatting)
-                    # We estimate roughly 10 chars overhead for "- " and "\n"
+                    # Estimate size: content + overhead for formatting
                     mem_size = len(mem.content) + 10
-                    
                     if mem_size <= remaining_chars:
                         selected_history.append(mem)
                         remaining_chars -= mem_size
                     else:
-                        # If the next newest message is too big, we stop.
-                        # This prevents "gaps" in the conversation.
                         break
-                    
-                add_section("Conversation History", selected_history[::-1])
                 
-        return "".join(parts).strip()
+                # Add history if we found any fits (reversed back to chronological order)
+                if selected_history:
+                    add_section("Conversation History", selected_history[::-1])
+
+        # --- PHASE 4: Assemble ---
+        # Body parts first
+        body = "".join(parts)
+        
+        # Combine: [Body] + [Corrections at the End]
+        final_context = f"{body}\n{corrections_text}".strip()
+        
+        return final_context
